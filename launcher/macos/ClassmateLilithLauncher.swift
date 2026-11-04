@@ -26,7 +26,20 @@ extension AppDelegate: SPUUpdaterDelegate {
 #endif
 
 @main
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
+    private static let logsToolbarItem = NSToolbarItem.Identifier("ClassmateLilith.Logs")
+    private static let updatesToolbarItem = NSToolbarItem.Identifier("ClassmateLilith.Updates")
+
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) {
+            application.run()
+        }
+    }
+
     private let workspaceURL = URL(string: "http://127.0.0.1:4178")!
     private lazy var launchToken = loadOrCreateLaunchToken()
     private var mainWindow: NSWindow!
@@ -57,8 +70,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         configureApplicationMenu()
         configureMainWindow()
         configureStatusMenu()
-        configureUpdater()
         showMainWindow()
+        configureUpdater()
+        if #available(macOS 26.0, *) { configureWindowToolbar() }
         beginStartup()
     }
 
@@ -223,9 +237,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         mainWindow.setFrameAutosaveName("ClassmateLilithMainWindow")
         mainWindow.isReleasedWhenClosed = false
         mainWindow.delegate = self
-        mainWindow.titlebarAppearsTransparent = true
-        mainWindow.titlebarSeparatorStyle = .none
-        mainWindow.backgroundColor = NSColor(calibratedRed: 0.969, green: 0.941, blue: 0.898, alpha: 1)
+        if #available(macOS 26.0, *) {
+            mainWindow.toolbarStyle = .unified
+            mainWindow.titlebarSeparatorStyle = .automatic
+        } else {
+            mainWindow.titlebarAppearsTransparent = true
+            mainWindow.titlebarSeparatorStyle = .none
+            mainWindow.backgroundColor = NSColor(calibratedRed: 0.969, green: 0.941, blue: 0.898, alpha: 1)
+        }
         mainWindow.isMovableByWindowBackground = true
         mainWindow.center()
 
@@ -295,24 +314,152 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNa
         stack.alignment = .centerX
         stack.spacing = 14
         stack.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            statusDetail.widthAnchor.constraint(lessThanOrEqualToConstant: 480)
+        ])
+#if compiler(>=6.2)
+        if #available(macOS 26.0, *) {
+            installStartupGlass(containing: stack)
+            return
+        }
+#endif
         statusContainer.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.centerXAnchor.constraint(equalTo: statusContainer.centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: statusContainer.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: statusContainer.leadingAnchor, constant: 40),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: statusContainer.trailingAnchor, constant: -40),
-            statusDetail.widthAnchor.constraint(lessThanOrEqualToConstant: 560)
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: statusContainer.trailingAnchor, constant: -40)
         ])
+    }
+
+#if compiler(>=6.2)
+    @available(macOS 26.0, *)
+    private func installStartupGlass(containing stack: NSStackView) {
+        statusContainer.layer?.backgroundColor = nil
+        statusTitle.textColor = .labelColor
+        statusDetail.textColor = .secondaryLabelColor
+
+        let card = NSGlassEffectView()
+        card.cornerRadius = 28
+        card.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        card.contentView = content
+        content.addSubview(stack)
+        statusContainer.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: statusContainer.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: statusContainer.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: statusContainer.leadingAnchor, constant: 32),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: statusContainer.trailingAnchor, constant: -32),
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 28),
+            stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -28),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 32),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -32)
+        ])
+    }
+#endif
+
+    private func configureWindowToolbar() {
+        let toolbar = NSToolbar(identifier: "ClassmateLilith.MainToolbar")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        mainWindow.toolbar = toolbar
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        var identifiers: [NSToolbarItem.Identifier] = [.flexibleSpace, Self.logsToolbarItem]
+#if canImport(Sparkle)
+        if updaterController != nil { identifiers.append(Self.updatesToolbarItem) }
+#endif
+        return identifiers
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        toolbarDefaultItemIdentifiers(toolbar)
+    }
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        let item = NSToolbarItem(itemIdentifier: identifier)
+        if identifier == Self.logsToolbarItem {
+            item.label = "打开日志文件夹"
+            item.image = NSImage(systemSymbolName: "folder", accessibilityDescription: item.label)
+            item.target = self
+            item.action = #selector(openLogs)
+        } else {
+#if canImport(Sparkle)
+            guard identifier == Self.updatesToolbarItem, let controller = updaterController else { return nil }
+            item.label = "检查更新"
+            item.image = NSImage(systemSymbolName: "arrow.trianglehead.clockwise", accessibilityDescription: item.label)
+            item.target = controller
+            item.action = #selector(SPUStandardUpdaterController.checkForUpdates(_:))
+#else
+            return nil
+#endif
+        }
+        item.toolTip = item.label
+        item.isBordered = true
+        return item
+    }
+
+    private func makeStatusBarIcon() -> NSImage {
+        let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in
+            NSColor.black.setStroke()
+            NSColor.black.setFill()
+
+            // Open book: broad curves and a clear center fold remain legible at 18 pt.
+            let book = NSBezierPath()
+            book.lineWidth = 1.25
+            book.lineCapStyle = .round
+            book.lineJoinStyle = .round
+            book.move(to: NSPoint(x: 1.8, y: 11.5))
+            book.curve(to: NSPoint(x: 9, y: 10.0),
+                       controlPoint1: NSPoint(x: 4.5, y: 12.2),
+                       controlPoint2: NSPoint(x: 7.2, y: 11.5))
+            book.curve(to: NSPoint(x: 16.2, y: 11.5),
+                       controlPoint1: NSPoint(x: 10.8, y: 11.5),
+                       controlPoint2: NSPoint(x: 13.5, y: 12.2))
+            book.line(to: NSPoint(x: 16.2, y: 4.7))
+            book.curve(to: NSPoint(x: 9, y: 3.2),
+                       controlPoint1: NSPoint(x: 13.5, y: 5.3),
+                       controlPoint2: NSPoint(x: 10.8, y: 4.7))
+            book.curve(to: NSPoint(x: 1.8, y: 4.7),
+                       controlPoint1: NSPoint(x: 7.2, y: 4.7),
+                       controlPoint2: NSPoint(x: 4.5, y: 5.3))
+            book.close()
+            book.move(to: NSPoint(x: 9, y: 10.0))
+            book.line(to: NSPoint(x: 9, y: 3.2))
+            book.stroke()
+
+            // A four-point star recalls the app's night-reading identity.
+            let star = NSBezierPath()
+            star.move(to: NSPoint(x: 13.2, y: 17.1))
+            star.curve(to: NSPoint(x: 15.4, y: 14.9),
+                       controlPoint1: NSPoint(x: 13.5, y: 15.6),
+                       controlPoint2: NSPoint(x: 13.9, y: 15.2))
+            star.curve(to: NSPoint(x: 13.2, y: 12.7),
+                       controlPoint1: NSPoint(x: 13.9, y: 14.6),
+                       controlPoint2: NSPoint(x: 13.5, y: 14.2))
+            star.curve(to: NSPoint(x: 11.0, y: 14.9),
+                       controlPoint1: NSPoint(x: 12.9, y: 14.2),
+                       controlPoint2: NSPoint(x: 12.5, y: 14.6))
+            star.curve(to: NSPoint(x: 13.2, y: 17.1),
+                       controlPoint1: NSPoint(x: 12.5, y: 15.2),
+                       controlPoint2: NSPoint(x: 12.9, y: 15.6))
+            star.close()
+            star.fill()
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     private func configureStatusMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         if let button = statusItem.button {
-            let icon = NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
-            icon.size = NSSize(width: 18, height: 18)
-            icon.isTemplate = false
-            button.image = icon
+            button.image = makeStatusBarIcon()
             button.toolTip = "Classmate Lilith"
+            button.setAccessibilityLabel("Classmate Lilith")
         }
 
         let menu = NSMenu()
